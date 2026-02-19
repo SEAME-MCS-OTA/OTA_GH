@@ -1,0 +1,26 @@
+ota-system/
+├── server/                 # OTA 서버
+│   ├── app.py             # Flask 애플리케이션
+│   ├── models.py          # SQLAlchemy 모델
+│   ├── config.py          # 설정 관리
+│   ├── mqtt_handler.py    # MQTT 핸들러
+│   ├── requirements.txt   # Python 의존성
+│   ├── Dockerfile         # Docker 이미지
+│   └── .env.example       # 환경 변수 예시
+├── client/                 # OTA 클라이언트
+│   ├── client.py          # 클라이언트 애플리케이션
+|   ├── config.py          # 설정 관리
+│   ├── requirements.txt   # Python 의존성
+|   ├── README.md
+│   └── .env.example       # 환경 변수 예시
+├── mosquitto/              # MQTT 브로커 설정
+│   └── mosquitto.conf     # Mosquitto 설정
+├── scripts/                # 유틸리티 스크립트
+│   ├── create_firmware.sh # 펌웨어 생성
+│   └── check_status.sh    # 상태 확인
+├── firmware_files/         # 펌웨어 저장소
+├── docker-compose.yml      # Docker Compose 설정
+├── schema.sql             # 데이터베이스 스키마
+├── quickstart.sh          # 빠른 시작 스크립트
+├── RUNNING_GUIDE.md       # 실행 가이드
+└── README.md              # 이 파일

@@ -1,0 +1,20 @@
+# Environment files
+.env
+**/.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Client runtime artifacts
+client/installed_app_backup_*/
+client/__pycache__/
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.dashboard.pid
+dashboard/dashboard.log
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db

@@ -1,0 +1,25 @@
+# OTA Server Dependencies
+
+# Web Framework
+Flask==3.0.0
+Werkzeug==3.0.1
+
+# Database
+Flask-SQLAlchemy==3.1.1
+psycopg2-binary==2.9.9
+
+# MQTT
+paho-mqtt==1.6.1
+
+# Utilities
+python-dotenv==1.0.0
+packaging==23.2
+
+# Frontend
+Flask-CORS==4.0.0
+
+# # Delta patching
+# bsdiff4==1.2.4
+
+requests==2.31.0
+gunicorn==21.2.0

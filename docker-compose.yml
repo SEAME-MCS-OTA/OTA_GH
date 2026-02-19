@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 데이터베이스
+  postgres:
+    image: postgres:14-alpine
+    container_name: ota-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ota_db}
+      POSTGRES_USER: ${DB_USER:-ota_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ota_password}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ota_user} -d ${DB_NAME:-ota_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ota-network
+    restart: unless-stopped
+
+  # Mosquitto MQTT 브로커
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: ota-mosquitto
+    ports:
+      - "${MQTT_BROKER_PORT:-1883}:1883"
+      # WebSocket (선택)
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 | grep -v Error || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ota-network
+    restart: unless-stopped
+
+  # OTA 서버
+  ota-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: ota-server
+    environment:
+      # Flask
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      DEBUG: ${DEBUG:-False}
+      # Database
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-ota_db}
+      DB_USER: ${DB_USER:-ota_user}
+      DB_PASSWORD: ${DB_PASSWORD:-ota_password}     
+      # Server
+      HOST: 0.0.0.0
+      PORT: 8080
+      # MQTT
+      MQTT_BROKER_HOST: mosquitto
+      MQTT_BROKER_PORT: 1883
+      MQTT_QOS: 2
+      # Firmware
+      FIRMWARE_DIR: /app/firmware_files
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./firmware_files:/app/firmware_files
+      # 개발 시 코드 마운트 (선택)
+      # - ./server:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ota-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  mosquitto_data:
+    driver: local
+  mosquitto_log:
+    driver: local
+
+networks:
+  ota-network:
+    driver: bridge
