@@ -3,6 +3,10 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_SOURCE_DIR="${SCRIPT_DIR}/sample_app"
+
 # 색상 정의
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,7 +23,7 @@ show_help() {
 
 인자:
     version     - 펌웨어 버전 (예: 1.0.1)
-    source_dir  - 소스 디렉토리 (기본: ./sample_app)
+    source_dir  - 소스 디렉토리 (기본: ${DEFAULT_SOURCE_DIR})
 
 예시:
     $0 1.0.1
@@ -39,8 +43,8 @@ if [ $# -lt 1 ]; then
 fi
 
 VERSION=$1
-SOURCE_DIR=${2:-"./sample_app"}
-OUTPUT_DIR="./firmware_files"
+SOURCE_DIR=${2:-"${DEFAULT_SOURCE_DIR}"}
+OUTPUT_DIR="${PROJECT_ROOT}/firmware_files"
 FIRMWARE_FILE="app_${VERSION}.tar.gz"
 OUTPUT_PATH="${OUTPUT_DIR}/${FIRMWARE_FILE}"
 
@@ -99,11 +103,20 @@ python app.py
 버전 정보는 version.txt 파일에 저장되어 있습니다.
 EOF
     
-    # 버전 치환
-    sed -i "s/__VERSION__/${VERSION}/g" "${SOURCE_DIR}/app.py"
-    
     echo -e "${GREEN}✓ 샘플 앱 생성 완료${NC}"
 fi
+
+# 버전 동기화
+echo "${VERSION}" > "${SOURCE_DIR}/version.txt"
+
+if [ -f "${SOURCE_DIR}/app.py" ]; then
+    if grep -q "__VERSION__" "${SOURCE_DIR}/app.py"; then
+        sed -i "s/__VERSION__/${VERSION}/g" "${SOURCE_DIR}/app.py"
+    elif grep -Eq '^[[:space:]]*VERSION[[:space:]]*=' "${SOURCE_DIR}/app.py"; then
+        sed -Ei "s|^([[:space:]]*VERSION[[:space:]]*=[[:space:]]*)[\"'][^\"']*[\"']|\\1\"${VERSION}\"|" "${SOURCE_DIR}/app.py"
+    fi
+fi
+echo -e "${GREEN}✓ 소스 버전 동기화 완료 (version.txt/app.py)${NC}"
 
 # 펌웨어 압축
 echo -e "${YELLOW}압축 중...${NC}"

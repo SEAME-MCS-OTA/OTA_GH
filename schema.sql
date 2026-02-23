@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS update_history (
     firmware_id INTEGER REFERENCES firmware(id),
     from_version VARCHAR(50),
     target_version VARCHAR(50) NOT NULL,
+    update_type VARCHAR(20), -- full, delta
     status VARCHAR(50) NOT NULL, -- downloading, verifying, installing, completed, failed
     progress INTEGER DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
     message TEXT,

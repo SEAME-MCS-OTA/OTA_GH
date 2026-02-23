@@ -16,6 +16,14 @@ from typing import Optional, Dict
 from config import Config
 import requests
 import paho.mqtt.client as mqtt
+from error_reporter import (
+    OTAPhase,
+    ErrorCode,
+    classify_exception,
+    classify_systemd_error,
+    report_ota_error,
+    report_ota_success,
+)
 
 # 로깅 설정
 logging.basicConfig(
@@ -58,6 +66,88 @@ class OTAClient:
             self.current_version = version
         except Exception as e:
             logger.error(f"Version save error: {e}")
+
+    @staticmethod
+    def _to_optional_int(value: str) -> Optional[int]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text == '':
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
+    def _report_context_kwargs(self) -> Dict:
+        kwargs: Dict = {}
+        if Config.REGION_COUNTRY:
+            kwargs["country"] = Config.REGION_COUNTRY
+        if Config.REGION_CITY:
+            kwargs["city"] = Config.REGION_CITY
+        if Config.REGION_TIMEZONE:
+            kwargs["tz_name"] = Config.REGION_TIMEZONE
+        if Config.POWER_SOURCE:
+            kwargs["power_source"] = Config.POWER_SOURCE
+
+        battery_pct = self._to_optional_int(Config.BATTERY_PCT)
+        rssi_dbm = self._to_optional_int(Config.NETWORK_RSSI_DBM)
+        latency_ms = self._to_optional_int(Config.NETWORK_LATENCY_MS)
+
+        if battery_pct is not None:
+            kwargs["battery_pct"] = battery_pct
+        if rssi_dbm is not None:
+            kwargs["rssi_dbm"] = rssi_dbm
+        if latency_ms is not None:
+            kwargs["latency_ms"] = latency_ms
+
+        return kwargs
+
+    def _send_failure_log(
+        self,
+        phase: str,
+        target_version: str,
+        error_code: str,
+        error_message: str,
+        ota_log: Optional[list] = None,
+        current_version: Optional[str] = None,
+    ) -> None:
+        try:
+            report_ota_error(
+                device_id=Config.VEHICLE_ID,
+                current_version=current_version or self.current_version,
+                target_version=target_version,
+                phase=phase,
+                error_code=error_code,
+                error_message=error_message,
+                server_url=Config.SERVER_URL,
+                ota_log=ota_log or [],
+                **self._report_context_kwargs(),
+            )
+        except Exception as ex:
+            logger.debug(f"Failure report send failed: {ex}")
+
+    def _send_success_log(
+        self,
+        phase: str,
+        target_version: str,
+        message: str,
+        ota_log: Optional[list] = None,
+        current_version: Optional[str] = None,
+    ) -> None:
+        try:
+            report_ota_success(
+                device_id=Config.VEHICLE_ID,
+                current_version=current_version or self.current_version,
+                target_version=target_version,
+                phase=phase,
+                server_url=Config.SERVER_URL,
+                message=message,
+                ota_log=ota_log or [],
+                **self._report_context_kwargs(),
+            )
+        except Exception as ex:
+            logger.debug(f"Success report send failed: {ex}")
     
     # 업데이트 확인 및 다운로드
     
@@ -119,9 +209,21 @@ class OTAClient:
         except Exception as e:
             logger.error(f"Download failed: {e}")
             self._report_status('failed', firmware_info['version'], str(e))
+            http_status = getattr(getattr(e, "response", None), "status_code", None)
+            error_code = classify_exception(e, http_status=http_status)
+            self._send_failure_log(
+                phase=OTAPhase.DOWNLOAD,
+                target_version=firmware_info.get('version', 'unknown'),
+                error_code=error_code,
+                error_message=str(e),
+                ota_log=[
+                    "DOWNLOAD START",
+                    f"DOWNLOAD FAIL code={error_code}",
+                ],
+            )
             return None
     
-    def verify_firmware(self, filepath: str, expected_sha256: str) -> bool:
+    def verify_firmware(self, filepath: str, expected_sha256: str, target_version: str) -> bool:
         """SHA256 검증"""
         try:
             logger.info("Verifying firmware...")
@@ -137,11 +239,33 @@ class OTAClient:
                 logger.info("Verification successful")
                 return True
             else:
-                logger.error(f"SHA256 mismatch: expected {expected_sha256[:16]}..., got {calculated[:16]}...")
+                msg = f"SHA256 mismatch: expected {expected_sha256[:16]}..., got {calculated[:16]}..."
+                logger.error(msg)
+                self._send_failure_log(
+                    phase=OTAPhase.VERIFY,
+                    target_version=target_version,
+                    error_code=ErrorCode.HASH_MISMATCH,
+                    error_message=msg,
+                    ota_log=[
+                        "VERIFY START",
+                        "VERIFY FAIL code=HASH_MISMATCH",
+                    ],
+                )
                 return False
                 
         except Exception as e:
             logger.error(f"Verification failed: {e}")
+            error_code = classify_exception(e)
+            self._send_failure_log(
+                phase=OTAPhase.VERIFY,
+                target_version=target_version,
+                error_code=error_code,
+                error_message=str(e),
+                ota_log=[
+                    "VERIFY START",
+                    f"VERIFY FAIL code={error_code}",
+                ],
+            )
             return False
     
     # 설치
@@ -157,15 +281,36 @@ class OTAClient:
                 success = self._install_systemd(filepath, version)
             else:
                 logger.error(f"Unknown install mode: {Config.INSTALL_MODE}")
+                self._send_failure_log(
+                    phase=OTAPhase.INSTALL,
+                    target_version=version,
+                    error_code=ErrorCode.UNKNOWN,
+                    error_message=f"Unknown install mode: {Config.INSTALL_MODE}",
+                    ota_log=[
+                        "INSTALL START",
+                        "INSTALL FAIL code=UNKNOWN mode",
+                    ],
+                )
                 return False
             
             return success
             
         except Exception as e:
             logger.error(f"Installation failed: {e}")
+            error_code = classify_exception(e)
+            self._send_failure_log(
+                phase=OTAPhase.INSTALL,
+                target_version=version,
+                error_code=error_code,
+                error_message=str(e),
+                ota_log=[
+                    "INSTALL START",
+                    f"INSTALL FAIL code={error_code} exception",
+                ],
+            )
             return False
     
-    def _install_file_copy(self, filepath: str, version: str) -> bool:
+    def _install_file_copy(self, filepath: str, version: str, save_version: bool = True) -> bool:
         """파일 복사 설치"""
         backup_dir = None
         try:
@@ -187,12 +332,14 @@ class OTAClient:
                 
                 shutil.copytree(temp_dir, Config.INSTALL_DIR)
             
-            self._save_version(version)
+            if save_version:
+                self._save_version(version)
             logger.info("Installation complete")
             return True
             
         except Exception as e:
             logger.error(f"Installation failed: {e}")
+            error_code = classify_exception(e)
             
             # 롤백
             if backup_dir and os.path.exists(backup_dir):
@@ -204,6 +351,16 @@ class OTAClient:
                     logger.info("Rollback successful")
                 except Exception as rollback_error:
                     logger.error(f"Rollback failed: {rollback_error}")
+            self._send_failure_log(
+                phase=OTAPhase.INSTALL,
+                target_version=version,
+                error_code=error_code,
+                error_message=str(e),
+                ota_log=[
+                    "INSTALL START",
+                    f"INSTALL FAIL code={error_code} file_copy",
+                ],
+            )
             
             return False
     
@@ -211,7 +368,7 @@ class OTAClient:
         """systemd 재시작 설치"""
         try:
             # 파일 복사
-            if not self._install_file_copy(filepath, version):
+            if not self._install_file_copy(filepath, version, save_version=False):
                 return False
             
             # 서비스 재시작
@@ -226,6 +383,17 @@ class OTAClient:
             
             if result.returncode != 0:
                 logger.error(f"Service restart failed: {result.stderr}")
+                code = classify_systemd_error(result.returncode, result.stderr, True)
+                self._send_failure_log(
+                    phase=OTAPhase.INSTALL,
+                    target_version=version,
+                    error_code=code,
+                    error_message=result.stderr.strip() or "systemctl restart failed",
+                    ota_log=[
+                        "INSTALL START",
+                        f"SERVICE RESTART FAIL code={code}",
+                    ],
+                )
                 return False
             
             # 상태 확인
@@ -239,16 +407,49 @@ class OTAClient:
             
             if result.stdout.strip() == 'active':
                 logger.info("Service active")
+                self._save_version(version)
                 return True
             else:
                 logger.error(f"Service not active: {result.stdout}")
+                code = classify_systemd_error(0, result.stdout, False)
+                self._send_failure_log(
+                    phase=OTAPhase.INSTALL,
+                    target_version=version,
+                    error_code=code,
+                    error_message=result.stdout.strip() or "service is not active",
+                    ota_log=[
+                        "INSTALL START",
+                        f"SERVICE HEALTH CHECK FAIL code={code}",
+                    ],
+                )
                 return False
                 
         except FileNotFoundError:
             logger.error("systemctl not found")
+            self._send_failure_log(
+                phase=OTAPhase.INSTALL,
+                target_version=version,
+                error_code=ErrorCode.SYSTEMD_UNIT_FAILED,
+                error_message="systemctl not found",
+                ota_log=[
+                    "INSTALL START",
+                    "INSTALL FAIL code=SYSTEMD_UNIT_FAILED systemctl not found",
+                ],
+            )
             return False
         except Exception as e:
             logger.error(f"systemd installation failed: {e}")
+            error_code = classify_exception(e)
+            self._send_failure_log(
+                phase=OTAPhase.INSTALL,
+                target_version=version,
+                error_code=error_code,
+                error_message=str(e),
+                ota_log=[
+                    "INSTALL START",
+                    f"INSTALL FAIL code={error_code} systemd",
+                ],
+            )
             return False
     
     # 상태 리포트
@@ -310,6 +511,7 @@ class OTAClient:
     def perform_update(self, firmware_info: Dict) -> bool:
         """전체 업데이트 프로세스"""
         version = firmware_info['version']
+        start_version = self.current_version
         
         try:
             logger.info(f"Update started: {self.current_version} -> {version}")
@@ -321,17 +523,30 @@ class OTAClient:
             
             # 검증
             self._report_status('verifying', version)
-            if not self.verify_firmware(filepath, firmware_info['sha256']):
+            if not self.verify_firmware(filepath, firmware_info['sha256'], version):
                 self._report_status('failed', version, 'Verification failed')
                 return False
             
             # 설치
             if not self.install_firmware(filepath, version):
+                self._report_status('failed', version, 'Installation failed')
                 return False
             
             # 완료
             self._report_status('completed', version)
             logger.info(f"Update completed: {version}")
+            self._send_success_log(
+                phase=OTAPhase.INSTALL,
+                target_version=version,
+                message="OTA update completed",
+                current_version=start_version,
+                ota_log=[
+                    "DOWNLOAD OK",
+                    "VERIFY OK",
+                    "INSTALL OK",
+                    "REPORT OK",
+                ],
+            )
             
             # 정리
             try:
@@ -344,6 +559,18 @@ class OTAClient:
         except Exception as e:
             logger.error(f"Update failed: {e}")
             self._report_status('failed', version, str(e))
+            error_code = classify_exception(e)
+            self._send_failure_log(
+                phase=OTAPhase.INSTALL,
+                target_version=version,
+                error_code=error_code,
+                error_message=str(e),
+                current_version=start_version,
+                ota_log=[
+                    "OTA START",
+                    f"OTA FAIL code={error_code} perform_update",
+                ],
+            )
             return False
     
     # MQTT 통신

@@ -89,7 +89,8 @@ echo "현재 버전: ${CURRENT_VERSION}"
 UPDATE_CHECK=$(curl -s "${SERVER_URL}/api/v1/update-check?vehicle_id=${VEHICLE_ID}&current_version=${CURRENT_VERSION}")
 echo "${UPDATE_CHECK}" | python3 -m json.tool 2>/dev/null || echo "${UPDATE_CHECK}"
 
-if echo "${UPDATE_CHECK}" | grep -q '"update_available": true'; then
+UPDATE_AVAILABLE=$(echo "${UPDATE_CHECK}" | python3 -c "import sys, json; print(str(json.load(sys.stdin).get('update_available', False)).lower())" 2>/dev/null || echo "false")
+if [ "${UPDATE_AVAILABLE}" = "true" ]; then
     echo -e "${GREEN}✓ 업데이트 가능!${NC}"
 else
     echo -e "${BLUE}i 최신 버전입니다${NC}"
@@ -133,7 +134,7 @@ echo -e "${BLUE}상태 확인 완료${NC}"
 echo -e "${BLUE}========================================${NC}"
 
 # 업데이트 트리거 명령어 제안
-if echo "${UPDATE_CHECK}" | grep -q '"update_available": true'; then
+if [ "${UPDATE_AVAILABLE}" = "true" ]; then
     LATEST_VERSION=$(echo "${UPDATE_CHECK}" | python3 -c "import sys, json; print(json.load(sys.stdin)['version'])" 2>/dev/null || echo "unknown")
     echo ""
     echo -e "${YELLOW}업데이트를 트리거하려면:${NC}"

@@ -21,6 +21,17 @@ python client.py
 ### 서버
 ```bash
 OTA_SERVER_URL=http://localhost:8080  # 서버 주소
+# 선택: 오류 리포트만 별도 endpoint로 전송 (예: OTA_VLM ingest)
+OTA_ERROR_REPORT_URL=http://localhost:4000/ingest
+
+# 선택: 리포트 컨텍스트 (OTA_VLM 지도/네트워크 통계용)
+OTA_REGION_COUNTRY=DE
+OTA_REGION_CITY=Berlin
+OTA_REGION_TIMEZONE=Europe/Berlin
+OTA_POWER_SOURCE=BATTERY
+OTA_BATTERY_PCT=62
+OTA_NETWORK_RSSI_DBM=-78
+OTA_NETWORK_LATENCY_MS=320
 ```
 
 ### 동작 모드

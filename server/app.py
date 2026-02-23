@@ -5,11 +5,14 @@ Flask REST API 서버
 import os
 import logging
 import hashlib
+import shutil
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_file    # request: 클라이언트의 HTTP 요청 전체 
 from flask_cors import CORS
 from packaging import version
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import inspect as sa_inspect, text
 
 from config import Config
 from models import db, Vehicle, Firmware, UpdateHistory
@@ -39,10 +42,29 @@ def init_db():
     with app.app_context():
         try:
             db.create_all()
+            ensure_schema_compatibility()
             logger.info("Database tables created successfully")
         except Exception as e:
             logger.error(f"Failed to create database tables: {e}")
             raise
+
+
+def ensure_schema_compatibility():
+    """기존 DB와 ORM 모델 간 스키마 차이를 최소한으로 보정"""
+    inspector = sa_inspect(db.engine)
+    table_names = set(inspector.get_table_names())
+
+    if 'update_history' not in table_names:
+        return
+
+    update_history_columns = {
+        column['name'] for column in inspector.get_columns('update_history')
+    }
+
+    with db.engine.begin() as conn:
+        if 'update_type' not in update_history_columns:
+            conn.execute(text("ALTER TABLE update_history ADD COLUMN update_type VARCHAR(20)"))
+            logger.info("Added missing column: update_history.update_type")
 
 def init_mqtt():
     """MQTT 핸들러 초기화"""
@@ -336,7 +358,7 @@ def upload_firmware():
             return jsonify({'error': 'No file provided'}), 400
         
         file = request.files['file']
-        version_str = request.form.get('version')
+        version_str = (request.form.get('version') or '').strip()
         release_notes = request.form.get('release_notes', '')
         
         if not version_str:
@@ -345,12 +367,27 @@ def upload_firmware():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
+        # 같은 버전이 이미 등록된 경우 즉시 거부
+        existing_firmware = Firmware.query.filter_by(version=version_str).first()
+        if existing_firmware:
+            return jsonify({
+                'error': f'Firmware version {version_str} already exists',
+                'firmware': existing_firmware.to_dict()
+            }), 409
+
         # 파일명 생성
         filename = f"app_{version_str}.tar.gz"
         filepath = os.path.join(Config.FIRMWARE_DIR, filename)
         
-        # 파일 저장
-        file.save(filepath)
+        # 파일 저장: 기존 파일 덮어쓰기 방지
+        try:
+            file.stream.seek(0)
+            with open(filepath, 'xb') as fw:
+                shutil.copyfileobj(file.stream, fw)
+        except FileExistsError:
+            return jsonify({
+                'error': f'Firmware file {filename} already exists on server'
+            }), 409
         
         # SHA256 계산
         sha256_hash = hashlib.sha256()
@@ -381,6 +418,12 @@ def upload_firmware():
             'success': True,
             'firmware': firmware.to_dict()
         }), 201
+
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({
+            'error': f'Firmware version {version_str} already exists'
+        }), 409
     
     except Exception as e:
         logger.error(f"Error uploading firmware: {e}", exc_info=True)

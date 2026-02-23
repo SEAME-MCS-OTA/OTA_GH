@@ -17,6 +17,15 @@ class Config:
     
     # ========== 차량 정보 ==========
     VEHICLE_ID = os.getenv('VEHICLE_ID', 'vehicle_001')
+
+    # ========== 리포트 컨텍스트(선택) ==========
+    REGION_COUNTRY = os.getenv('OTA_REGION_COUNTRY', '')
+    REGION_CITY = os.getenv('OTA_REGION_CITY', '')
+    REGION_TIMEZONE = os.getenv('OTA_REGION_TIMEZONE', '')
+    POWER_SOURCE = os.getenv('OTA_POWER_SOURCE', '')
+    BATTERY_PCT = os.getenv('OTA_BATTERY_PCT', '')
+    NETWORK_RSSI_DBM = os.getenv('OTA_NETWORK_RSSI_DBM', '')
+    NETWORK_LATENCY_MS = os.getenv('OTA_NETWORK_LATENCY_MS', '')
     
     # ========== MQTT 설정 ==========
     MQTT_BROKER_HOST = os.getenv('MQTT_BROKER_HOST', 'localhost')
