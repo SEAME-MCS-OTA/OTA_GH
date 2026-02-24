@@ -1,5 +1,5 @@
 #!/bin/bash
-# 펌웨어 패키지 생성 스크립트
+# 펌웨어 패키지 생성 + 자동 업로드 스크립트
 
 set -e
 
@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 
 # 도움말
 show_help() {
-    cat << EOF
+    cat << EOF2
 펌웨어 생성 스크립트
 
 사용법:
@@ -30,9 +30,15 @@ show_help() {
     $0 1.0.1 /path/to/app
 
 생성물:
-    firmware_files/app_<version>.tar.gz
+    build_firmware/app_<version>.tar.gz
 
-EOF
+환경 변수:
+    OTA_AUTO_UPLOAD   - 생성 후 서버 자동 업로드 여부 (기본: true)
+    OTA_SERVER_URL    - OTA 서버 주소 (기본: http://localhost:8080)
+    OTA_OVERWRITE     - 동일 버전/파일 덮어쓰기 (기본: true)
+    OTA_RELEASE_NOTES - 릴리즈 노트 (기본: Release <version>)
+
+EOF2
 }
 
 # 인자 확인
@@ -44,16 +50,21 @@ fi
 
 VERSION=$1
 SOURCE_DIR=${2:-"${DEFAULT_SOURCE_DIR}"}
-OUTPUT_DIR="${PROJECT_ROOT}/firmware_files"
+OUTPUT_DIR="${PROJECT_ROOT}/build_firmware"
 FIRMWARE_FILE="app_${VERSION}.tar.gz"
 OUTPUT_PATH="${OUTPUT_DIR}/${FIRMWARE_FILE}"
+AUTO_UPLOAD="${OTA_AUTO_UPLOAD:-true}"
+SERVER_URL="${OTA_SERVER_URL:-http://localhost:8080}"
+OVERWRITE="${OTA_OVERWRITE:-true}"
+RELEASE_NOTES="${OTA_RELEASE_NOTES:-Release ${VERSION}}"
+AUTO_UPLOAD_LC="$(printf '%s' "${AUTO_UPLOAD}" | tr '[:upper:]' '[:lower:]')"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}펌웨어 생성 시작${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo "버전: ${VERSION}"
 echo "소스: ${SOURCE_DIR}"
-echo "출력: ${OUTPUT_PATH}"
+echo "로컬 산출물: ${OUTPUT_PATH}"
 echo ""
 
 # 출력 디렉토리 생성
@@ -62,9 +73,9 @@ mkdir -p "${OUTPUT_DIR}"
 # 소스 디렉토리 확인
 if [ ! -d "${SOURCE_DIR}" ]; then
     echo -e "${YELLOW}소스 디렉토리가 없습니다. 샘플 앱을 생성합니다...${NC}"
-    
+
     mkdir -p "${SOURCE_DIR}"
-    
+
     # 샘플 앱 생성
     cat > "${SOURCE_DIR}/app.py" << 'PYEOF'
 #!/usr/bin/env python3
@@ -78,16 +89,16 @@ VERSION = "__VERSION__"
 def main():
     print(f"Sample App v{VERSION}")
     print("Hello from OTA updated application!")
-    
+
 if __name__ == '__main__':
     main()
 PYEOF
-    
+
     # 버전 정보 파일
     echo "${VERSION}" > "${SOURCE_DIR}/version.txt"
-    
+
     # README
-    cat > "${SOURCE_DIR}/README.md" << 'EOF'
+    cat > "${SOURCE_DIR}/README.md" << 'MDEOF'
 # Sample OTA Application
 
 이 애플리케이션은 OTA 업데이트 테스트용 샘플입니다.
@@ -101,8 +112,8 @@ python app.py
 ## 버전
 
 버전 정보는 version.txt 파일에 저장되어 있습니다.
-EOF
-    
+MDEOF
+
     echo -e "${GREEN}✓ 샘플 앱 생성 완료${NC}"
 fi
 
@@ -138,42 +149,47 @@ echo "크기: ${FILE_SIZE} bytes"
 echo "SHA256: ${SHA256}"
 echo ""
 
-# 서버 업로드 명령어 출력
-echo -e "${YELLOW}서버에 업로드하려면:${NC}"
-echo ""
-echo "curl -X POST http://localhost:8080/api/v1/admin/firmware \\"
-echo "  -F \"file=@${OUTPUT_PATH}\" \\"
-echo "  -F \"version=${VERSION}\" \\"
-echo "  -F \"release_notes=Release ${VERSION}\""
-echo ""
+if [[ "${AUTO_UPLOAD_LC}" != "true" ]]; then
+    echo -e "${YELLOW}자동 업로드 비활성화됨 (OTA_AUTO_UPLOAD=${AUTO_UPLOAD})${NC}"
+    echo -e "${YELLOW}수동 업로드 명령:${NC}"
+    echo "curl -X POST \"${SERVER_URL}/api/v1/admin/firmware\" \\"
+    echo "  -F \"file=@${OUTPUT_PATH}\" \\"
+    echo "  -F \"version=${VERSION}\" \\"
+    echo "  -F \"release_notes=${RELEASE_NOTES}\" \\"
+    echo "  -F \"overwrite=${OVERWRITE}\""
+    echo ""
+    echo -e "${GREEN}완료!${NC}"
+    exit 0
+fi
 
-# 업로드 스크립트 생성 옵션
-read -p "업로드 스크립트를 생성할까요? (y/N): " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    UPLOAD_SCRIPT="upload_firmware_${VERSION}.sh"
-    
-    cat > "${UPLOAD_SCRIPT}" << EOF
-#!/bin/bash
-# 펌웨어 ${VERSION} 업로드 스크립트
+echo -e "${YELLOW}서버 업로드 중...${NC}"
+echo "서버: ${SERVER_URL}"
+echo "release_notes: ${RELEASE_NOTES}"
+echo "overwrite: ${OVERWRITE}"
 
-SERVER_URL=\${OTA_SERVER_URL:-http://localhost:8080}
+if ! UPLOAD_RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "${SERVER_URL}/api/v1/admin/firmware" \
+    -F "file=@${OUTPUT_PATH}" \
+    -F "version=${VERSION}" \
+    -F "release_notes=${RELEASE_NOTES}" \
+    -F "overwrite=${OVERWRITE}"); then
+    echo -e "${RED}✗ 업로드 요청 실패 (서버 연결 불가 또는 네트워크 오류)${NC}"
+    exit 1
+fi
 
-echo "펌웨어 업로드 중: ${VERSION}"
-echo "서버: \${SERVER_URL}"
+HTTP_STATUS=$(printf '%s\n' "${UPLOAD_RESPONSE}" | tail -n 1 | tr -d '\r')
+RESPONSE_BODY=$(printf '%s\n' "${UPLOAD_RESPONSE}" | sed '$d')
 
-curl -X POST "\${SERVER_URL}/api/v1/admin/firmware" \\
-  -F "file=@${OUTPUT_PATH}" \\
-  -F "version=${VERSION}" \\
-  -F "release_notes=Release ${VERSION}"
-
-echo ""
-echo "업로드 완료"
-EOF
-    
-    chmod +x "${UPLOAD_SCRIPT}"
-    echo -e "${GREEN}✓ 업로드 스크립트 생성: ${UPLOAD_SCRIPT}${NC}"
-    echo "실행: ./${UPLOAD_SCRIPT}"
+if [[ "${HTTP_STATUS}" == "200" || "${HTTP_STATUS}" == "201" ]]; then
+    echo -e "${GREEN}✓ 서버 업로드 성공 (HTTP ${HTTP_STATUS})${NC}"
+    if [ -n "${RESPONSE_BODY}" ]; then
+        echo "${RESPONSE_BODY}"
+    fi
+else
+    echo -e "${RED}✗ 서버 업로드 실패 (HTTP ${HTTP_STATUS})${NC}"
+    if [ -n "${RESPONSE_BODY}" ]; then
+        echo "${RESPONSE_BODY}"
+    fi
+    exit 1
 fi
 
 echo ""

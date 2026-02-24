@@ -32,6 +32,7 @@ OTAClient (client.py)
     UNKNOWN            : 위 분류 외 모든 Exception fallback
 """
 
+import argparse
 import json
 import logging
 import os
@@ -41,8 +42,12 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import requests
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# standalone 실행 시에도 client/.env 설정을 사용
+load_dotenv()
 
 
 # ──────────────────────────────────────────────
@@ -594,6 +599,54 @@ def report_ota_success(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(levelname)s - %(message)s")
 
+    def _env_or_default(key: str, default: str) -> str:
+        value = os.getenv(key, "").strip()
+        return value if value else default
+
+    def _env_or_int(key: str, default: int) -> int:
+        value = os.getenv(key, "").strip()
+        if not value:
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            return default
+
+    parser = argparse.ArgumentParser(description="OTA error report demo")
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help="build된 DEMO report를 endpoint로 실제 전송",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=os.getenv("OTA_SERVER_URL", "http://localhost:8080"),
+        help="기본 OTA 서버 URL (기본: env OTA_SERVER_URL 또는 http://localhost:8080)",
+    )
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help="전송 endpoint override (예: http://localhost:4000/ingest)",
+    )
+    parser.add_argument(
+        "--case",
+        type=int,
+        default=0,
+        help="0이면 전체, 1~N이면 해당 DEMO CASE만 실행",
+    )
+    args = parser.parse_args()
+
+    # DEMO 실행 시 컨텍스트가 비어 대시보드 필드가 누락되지 않도록 기본값 제공
+    demo_context_defaults = {
+        "country": _env_or_default("OTA_REGION_COUNTRY", "DE"),
+        "city": _env_or_default("OTA_REGION_CITY", "Düsseldorf"),
+        "tz_name": _env_or_default("OTA_REGION_TIMEZONE", "Europe/Berlin"),
+        "power_source": _env_or_default("OTA_POWER_SOURCE", "BATTERY"),
+        "battery_pct": _env_or_int("OTA_BATTERY_PCT", 85),
+        "rssi_dbm": _env_or_int("OTA_NETWORK_RSSI_DBM", -55),
+        "latency_ms": _env_or_int("OTA_NETWORK_LATENCY_MS", 373),
+    }
+
     DEMO_CASES = [
         # ── CASE 1: 다운로드 중 서버 오류 ──────────────────────
         dict(
@@ -700,10 +753,24 @@ if __name__ == "__main__":
         ),
     ]
 
-    for case in DEMO_CASES:
+    selected_cases = DEMO_CASES
+    if args.case:
+        if args.case < 1 or args.case > len(DEMO_CASES):
+            raise SystemExit(f"--case must be between 1 and {len(DEMO_CASES)}")
+        selected_cases = [DEMO_CASES[args.case - 1]]
+
+    for idx, item in enumerate(selected_cases, start=1):
+        case = dict(item)
         label = case.pop("label")
         print(f"\n{'='*60}")
-        print(f"  {label}")
+        print(f"  [{idx}] {label}")
         print('='*60)
-        report = build_error_report(**case)
+        report = build_error_report(**{**demo_context_defaults, **case})
         print(json.dumps(report, ensure_ascii=False, indent=2))
+        if args.send:
+            ok = send_error_report(
+                report=report,
+                server_url=args.server_url,
+                endpoint_override=args.endpoint,
+            )
+            print(f"\nSEND RESULT: {'OK' if ok else 'FAIL'}")

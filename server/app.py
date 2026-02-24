@@ -115,6 +115,13 @@ def compare_versions(v1: str, v2: str) -> int:
             return 0
 
 
+def parse_bool(value, default: bool = False) -> bool:
+    """문자열/폼 값을 불리언으로 변환"""
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """서버의 헬스체크 엔드포인트"""
@@ -352,6 +359,7 @@ def upload_firmware():
         file: 펌웨어 파일
         version: 버전 (예: 1.0.1)
         release_notes: 릴리즈 노트 (선택)
+        overwrite: 기존 버전/파일 덮어쓰기 여부 (선택, 기본 false)
     """
     try:
         if 'file' not in request.files:
@@ -360,6 +368,7 @@ def upload_firmware():
         file = request.files['file']
         version_str = (request.form.get('version') or '').strip()
         release_notes = request.form.get('release_notes', '')
+        overwrite = parse_bool(request.form.get('overwrite'), default=False)
         
         if not version_str:
             return jsonify({'error': 'Version is required'}), 400
@@ -367,27 +376,42 @@ def upload_firmware():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        # 같은 버전이 이미 등록된 경우 즉시 거부
-        existing_firmware = Firmware.query.filter_by(version=version_str).first()
-        if existing_firmware:
-            return jsonify({
-                'error': f'Firmware version {version_str} already exists',
-                'firmware': existing_firmware.to_dict()
-            }), 409
-
         # 파일명 생성
         filename = f"app_{version_str}.tar.gz"
         filepath = os.path.join(Config.FIRMWARE_DIR, filename)
-        
-        # 파일 저장: 기존 파일 덮어쓰기 방지
-        try:
-            file.stream.seek(0)
-            with open(filepath, 'xb') as fw:
-                shutil.copyfileobj(file.stream, fw)
-        except FileExistsError:
+
+        # 같은 버전이 이미 등록된 경우 기본적으로 거부
+        existing_firmware = Firmware.query.filter_by(version=version_str).first()
+        if existing_firmware and not overwrite:
             return jsonify({
-                'error': f'Firmware file {filename} already exists on server'
+                'error': (
+                    f'Firmware version {version_str} already exists. '
+                    f'Use overwrite=true to replace it.'
+                ),
+                'firmware': existing_firmware.to_dict()
             }), 409
+
+        old_filepath = existing_firmware.file_path if existing_firmware else None
+
+        # 파일 저장: overwrite=false일 때 기존 파일 덮어쓰기 방지
+        if os.path.exists(filepath):
+            if not overwrite:
+                return jsonify({
+                    'error': (
+                        f'Firmware file {filename} already exists on server. '
+                        f'Use overwrite=true to replace it.'
+                    )
+                }), 409
+            os.remove(filepath)
+
+        file.stream.seek(0)
+        with open(filepath, 'wb') as fw:
+            shutil.copyfileobj(file.stream, fw)
+        
+        if not os.path.exists(filepath):
+            return jsonify({
+                'error': 'Failed to save uploaded firmware file'
+            }), 500
         
         # SHA256 계산
         sha256_hash = hashlib.sha256()
@@ -397,27 +421,48 @@ def upload_firmware():
         
         sha256 = sha256_hash.hexdigest()
         file_size = os.path.getsize(filepath)
+
+        # 기존 버전 파일 경로가 달라졌다면 잔여 파일 정리
+        if (
+            overwrite and
+            old_filepath and
+            old_filepath != filepath and
+            os.path.exists(old_filepath)
+        ):
+            os.remove(old_filepath)
         
-        # DB에 등록
-        firmware = Firmware(
-            version=version_str,
-            filename=filename,
-            file_path=filepath, 
-            file_size=file_size,
-            sha256=sha256,
-            release_notes=release_notes,
-            is_active=True
-        )
-        
-        db.session.add(firmware)
+        # DB 반영 (신규 등록 또는 기존 버전 갱신)
+        if existing_firmware:
+            existing_firmware.filename = filename
+            existing_firmware.file_path = filepath
+            existing_firmware.file_size = file_size
+            existing_firmware.sha256 = sha256
+            existing_firmware.release_notes = release_notes
+            existing_firmware.is_active = True
+            firmware = existing_firmware
+            status_code = 200
+            logger.info(f"Firmware replaced: {version_str} ({filename})")
+        else:
+            firmware = Firmware(
+                version=version_str,
+                filename=filename,
+                file_path=filepath, 
+                file_size=file_size,
+                sha256=sha256,
+                release_notes=release_notes,
+                is_active=True
+            )
+            db.session.add(firmware)
+            status_code = 201
+            logger.info(f"Firmware uploaded: {version_str} ({filename})")
+
         db.session.commit()
-        
-        logger.info(f"Firmware uploaded: {version_str} ({filename})")
-        
+
         return jsonify({
             'success': True,
+            'updated': bool(existing_firmware),
             'firmware': firmware.to_dict()
-        }), 201
+        }), status_code
 
     except IntegrityError:
         db.session.rollback()
